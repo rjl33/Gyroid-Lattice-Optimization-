@@ -208,6 +208,80 @@ def parse_moose_csv(out_csv_path):
                 E_eff = float(row["E_eff"])
     return Fz_top, k_eff, E_eff
 
+def run_sim(porosity, grading, period, save_to_csv=None):
+    """Wrapper around the exisiting pipeline for BO"""
+
+    import tempfile 
+    import shutil
+
+    #create design dict
+    design = {
+        "porosity": float(porosity),
+        "periods": int(round(period)),
+        "grading": float(grading)
+    }
+
+    #Create a temporary run directory 
+    with tempfile.TemporaryDirectory(prefix="bo_run_") as run_dir:
+        run_dir = Path(run_dir)
+
+        try:
+            #Generate Stl
+            stl_path = generate_stl(design, run_dir,  cube_size=25.0)
+
+            #Feasibility Check
+            feasible, rho_star, rho_slice_min, rho_slice_max, note = feasability_filter(
+                stl_path,
+                rho_max=0.85,
+                cube_size=25.0
+            )
+
+            if not feasible:
+                print(f"Infeasible: {note}")
+                return None, 0
+            
+            #Mesh the stl:
+            msh_path = run_dir / "part.msh"
+            stl_to_mesh(stl_path, msh_path)
+
+            #Write  MOOSE input:
+            job_i_path = write_moose_input(
+                template_path="base_template.i",
+                msh_path=msh_path,
+                run_dir=run_dir
+            )
+
+            #Run MOOSE:
+            success = run_moose(str(job_i_path), str(run_dir), mpi_ranks=16)
+
+            if not success:
+                print(f"MOOSE failed to converge")
+                return None, 0
+            
+            #Parse Results
+            out_csv_path = run_dir / "out.csv"
+            Fz_top, k_eff, E_eff = parse_moose_csv(out_csv_path)
+
+            #Compute objective (specific stiffness)
+            if E_eff is not None and rho_star > 0:
+                specific_stiffness = E_eff / rho_star
+                print(f"Success! E_eff={E_eff:.2f}, rho*={rho_star:.f}, SS={specific_stiffness:.f}")
+                return specific_stiffness, 1
+            
+            else:
+                print(f" Missing E_eff data")
+                return None, 0
+            
+        except Exception as e:
+            print(f"Exception: {e}")
+            return None, 0
+        
+
+        
+
+            
+
+
 
 
 def main():
